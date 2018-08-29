@@ -56,6 +56,8 @@ Cache.equity = T
 Cache.index = F
 
 ### Cache equity
+
+print('我又改了')
 if (Cache.equity == T){
   A.share.market = read.csv("A股行情数据.csv",header= T)
   A.share.IPO.date = read.csv("A股发行日.csv",header= T)
