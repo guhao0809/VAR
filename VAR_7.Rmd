@@ -1,0 +1,1073 @@
+---
+title: "Package_try"
+output: html_document
+---
+
+```{r cars}
+library(WindR)
+library(data.table)
+library(stringr)
+library(DBI)
+library(RMySQL)
+library(Amelia)
+library(knitr)
+library(ggplot2)
+library(rmarkdown)
+w.start()
+set.seed(1993)
+# w.stop()
+```
+# Data Process
+```{r}
+ratio_try = read.table("fh_s.txt", header = T)
+H_index = read.csv("港股行情.csv",header= T)
+A.share.IPO.date = read.csv("A股发行日.csv",header= T)
+A.share.market = read.csv("A股行情数据.csv",header= T)
+Wind.industry = read.csv("wind行业.csv",header= T)
+
+# fhold_sec
+# fhold_sec = read.table("fhold_sec.txt", header = T) # individual stocks ratio in each portfolio 
+# fund.name.list <<- unique(fhold_sec$name)
+# date.list <- sort(unique(fhold_sec$date)) # messy date order
+# # date_2018 = date.list[1:182]
+# load("fasset_dc.Rdata") # name == fasset
+# fasset_process = fasset[as.factor(fasset$date) %in% date.list & factor(fasset$name) %in% fund.name.list]
+# # fhold_sec$ratio = as.numeric(0)
+# # fhold_sec$true_ratio = as.numeric(0)
+# # for (name_number in  1:length(fund.name.list)){
+# #   for (days_number in 1:length(date_2018)){
+# #     fhold_sec[fhold_sec$name == fund.name.list[name_number] & fhold_sec$date == date_2018[days_number],]$ratio = fasset_process[fasset_process$name %in% fund.name.list[name_number] & as.factor(fasset_process$date) %in% date_2018[days_number],]$nav
+# #   }
+# # }
+# # fhold_sec[is.na(fhold_sec$ratio),] # good 
+# fhold_sec$true_ratio = fhold_sec$cvalue/fhold_sec$ratio # Use true ratio as ratio
+# fhold_sec_process = data.frame(date = fhold_sec$date, name = fhold_sec$name, seccode = fhold_sec$seccode, ratio = fhold_sec$true_ratio)
+# # Stock re
+# stock_return = read.table("stock_return.txt", header = T) # Stock return 
+# # merge(stock_return, fhold_sec[,c("seccode","secname")], by.x = "seccode", by.y ="seccode", all.x = TRUE)
+# trading.date.list = sort(unique(stock_return$date))
+```
+
+# Data to SQL
+```{r new process}
+### Input index
+read.ratio = T
+Cache.equity = T
+Cache.index = T
+
+### Cache equity
+if (Cache.equity == T){
+  A.share.market = read.csv("A股行情数据.csv",header= T)
+  A.share.IPO.date = read.csv("A股发行日.csv",header= T)
+  A.share.IPO.date$S_INFO_LISTDATE = sapply(1:length(A.share.IPO.date$S_INFO_LISTDATE), function(x) paste(substring(A.share.IPO.date$S_INFO_LISTDATE[x],c(1,5,7),c(4,6,8)),collapse="-"))
+  A.share.market$logreturn_T0 = A.share.market$LGRT
+  A.share.market = merge(A.share.market, A.share.IPO.date[,c("S_INFO_WINDCODE","S_INFO_LISTDATE")], by.x = "S_INFO_WINDCODE", by.y = "S_INFO_WINDCODE", all.x = TRUE)
+  A.share.market$TRADE_DT = sapply(1:length(A.share.market$TRADE_DT), function(x) paste(substring(A.share.market$TRADE_DT[x],c(1,5,7),c(4,6,8)),collapse="-"))
+  # stock_return = read.table("stock_return.txt", header = T) 
+  stock_return = subset(A.share.market,select = c(S_INFO_WINDCODE,TRADE_DT,logreturn_T0,ZT,DT,S_INFO_LISTDATE))
+  stock_return[stock_return$DT == 1,]$ZT  = -1
+  equity_dt =subset(stock_return, select = -DT)
+  colnames(equity_dt) = c("seccode","date","logreturn_T0", "maxupordown","ipo_date")
+  H_share.market = read.csv("港股行情.csv",header= T)
+  H_share.market$maxupordown = NA
+  H_share.market$ipo_date = NA
+  H_share.market = subset(H_share.market, select = -c(X...,S_DQ_PRECLOSE,S_DQ_CLOSE))
+  colnames(H_share.market) = c("seccode","date","logreturn_T0", "maxupordown","ipo_date")
+  H_share.market$date = sapply(1:length(H_share.market$date), function(x) paste(substring(H_share.market$date[x],c(1,5,7),c(4,6,8)),collapse="-"))
+  equity_dt_final = rbind(equity_dt,H_share.market)
+  # Industry added
+  Wind.industry = read.csv("wind行业.csv",header= T)
+  setorder(Wind.industry, -S_INFO_WINDCODE, -ENTRY_DT)
+  Wind.industry = Wind.industry[!duplicated(Wind.industry[,c('S_INFO_WINDCODE')]),]
+  equity_dt_final = merge(equity_dt_final, Wind.industry[,c("S_INFO_WINDCODE","INDUSTRIESNAME")], by.x = "seccode", by.y = "S_INFO_WINDCODE", all.x = TRUE)
+  setorder(equity_dt_final,seccode, date)
+  # equity_dt_final[is.na(equity_dt_final$maxupordown),]$maxupordown = 0 # unify the NA in HK.share to 0, for the convenience of EM 
+  #
+  # equity_dt_final = subset(equity_dt_final, select = -row_names)
+  total.ticker.list = unique(equity_dt_final$seccode)
+  trading.date.list = sort(unique(equity_dt_final$date))
+  
+  # Cache to SQL
+    con <- dbConnect(MySQL(),host="localhost",dbname="database",user="root",password="llh07310150")
+  dbSendQuery(con,'SET NAMES gbk')
+  table.name.list = dbListTables(con) 
+  if (!"equity_table" %in% table.name.list){
+    dbWriteTable(con,"equity_table", equity_dt_final, overwrite = TRUE)
+  }else{
+    dbRemoveTable(con, "equity_table") 
+    dbWriteTable(con,"equity_table", equity_dt_final, overwrite = TRUE)
+  }  
+  if (!"a_equity_table" %in% table.name.list){
+    dbWriteTable(con,"a_equity_table", equity_dt_final[1:dim(equity_dt)[1],], overwrite = TRUE)
+  }else{
+    dbRemoveTable(con, "a_equity_table") 
+    dbWriteTable(con,"a_equity_table", equity_dt_final[1:dim(equity_dt)[1],], overwrite = TRUE)
+  }
+  if (!"h_equity_table" %in% table.name.list){
+    dbWriteTable(con,"h_equity_table", equity_dt_final[c(dim(equity_dt)[1]+1):dim(equity_dt_final)[1],], overwrite = TRUE)
+  }else{
+    dbRemoveTable(con, "h_equity_table") 
+    dbWriteTable(con,"h_equity_table", equity_dt_final[c(dim(equity_dt)[1]+1):dim(equity_dt_final)[1],], overwrite = TRUE)
+  }
+    dbConnect(con)   
+}
+# cons<-dbListConnections(MySQL())
+# for(con in cons) {
+#   dbDisconnect(con)
+# }
+# Cache index 
+if (Cache.index == T){
+  basic.index = "000906.SH"
+  sw.industry.indexes = c("801010.SI","801020.SI","801030.SI","801040.SI","801050.SI","801080.SI","801110.SI","801120.SI","801130.SI","801140.SI","801150.SI","801160.SI","801170.SI","801180.SI","801200.SI","801210.SI","801230.SI","801710.SI","801720.SI","801730.SI","801740.SI",'801750.SI',"801760.SI","801770.SI","801780.SI","801790.SI","801880.SI","801890.SI")
+  hs.index = "LG300.WI"
+  
+  # A index
+  A_index = read.csv("指数收益率.csv",header = T)
+  A_index$TRADE_DT = sapply(1:length(A_index$TRADE_DT), function(x) paste(substring(A_index$TRADE_DT[x],c(1,5,7),c(4,6,8)),collapse="-"))
+  A_index_selected = A_index[A_index$S_INFO_WINDCODE %in% basic.index & A_index$TRADE_DT %in% trading.date.list,]
+  A_index_selected = subset(A_index_selected, select = -X...)
+  # Industry index
+  industry.index = read.csv("行业指数收益.csv",header = T)
+  industry.index.selected = industry.index[industry.index$S_INFO_WINDCODE %in% sw.industry.indexes,]
+  industry.index.selected$TRADE_DT = sapply(1:length(industry.index.selected$TRADE_DT), function(x) paste(substring(industry.index.selected$TRADE_DT[x],c(1,5,7),c(4,6,8)),collapse="-"))
+  industry.index.selected = subset(industry.index.selected, select = -X...)
+  # H index
+  H.index = read.csv("LG300指数行情序列.csv",header = T)
+  H.index.selected = H.index[H.index$S_INFO_WINDCODE %in% hs.index,]
+  H.index.selected$TRADE_DT = sapply(1:length(H.index.selected$TRADE_DT), function(x) paste(substring(H.index.selected$TRADE_DT[x],c(1,5,7),c(4,6,8)),collapse="-"))
+  # merge three list
+  colnames(A_index_selected) = c("seccode","date","logreturn_T0")
+  colnames(industry.index.selected) = c("seccode","date","logreturn_T0")
+  colnames(H.index.selected) = c("seccode","date","logreturn_T0")
+  index_dt_final = rbind(A_index_selected, industry.index.selected, H.index.selected)  
+
+  
+  con <- dbConnect(MySQL(),host="localhost",dbname="database",user="root",password="llh07310150")
+  dbSendQuery(con,'SET NAMES gbk')
+  table.name.list = dbListTables(con)    
+  if (!"index_table" %in% table.name.list){
+  dbWriteTable(con,"index_table", index_dt_final, overwrite = TRUE)
+}else{
+  dbRemoveTable(con, "index_table") 
+  dbWriteTable(con,"index_table", index_dt_final, overwrite = TRUE)
+}
+    dbConnect(con)    
+
+}
+
+# hold ratio
+if (read.ratio == T){
+  equity.hold = read.table("fh_s(1).txt", header = T)
+  equity.hold = equity.hold[!is.na(equity.hold$seccode),]
+  fund.name.list <- unique(equity.hold$name)
+  temp.date.list <- sort(unique(equity.hold$date)) # messy date order
+  # date_2018 = date.list[str_detect(date.list,"2018")]
+  temp2.date.list = temp.date.list[temp.date.list %in% trading.date.list]
+  date.list = temp2.date.list
+  temp.equity.ratio.df = data.frame(date = equity.hold$date, name = equity.hold$name, SEC_NAME = equity.hold$secname, seccode = equity.hold$seccode, ratio = equity.hold$ratio)
+  equity.ratio.df = temp.equity.ratio.df[temp.equity.ratio.df$date %in% date.list,]  
+
+  # Cache to SQL
+  con <- dbConnect(MySQL(),host="localhost",dbname="database",user="root",password="llh07310150")
+  dbSendQuery(con,'SET NAMES gbk')
+  table.name.list = dbListTables(con)  
+  if (!"ratio_table" %in% table.name.list){
+    dbWriteTable(con,"ratio_table", equity.ratio.df, overwrite = TRUE)
+  }else{
+    dbRemoveTable(con, "ratio_table") 
+    dbWriteTable(con,"ratio_table", equity.ratio.df, overwrite = TRUE)
+  }
+    dbConnect(con)   
+}
+```
+
+### Process 
+```{r,fig.width=8, fig.height=4}
+### logic parameter
+Index_calculation = T
+basic.index = "000906.SH"
+sw.industry.indexes = c("801010.SI","801020.SI","801030.SI","801040.SI","801050.SI","801080.SI","801110.SI","801120.SI","801130.SI","801140.SI","801150.SI","801160.SI","801170.SI","801180.SI","801200.SI","801210.SI","801230.SI","801710.SI","801720.SI","801730.SI","801740.SI",'801750.SI',"801760.SI","801770.SI","801780.SI","801790.SI","801880.SI","801890.SI")
+hs.index = "LG300.WI"
+
+#Read data
+con <- dbConnect(MySQL(),host="localhost",dbname="database",user="root",password="llh07310150")
+dbListTables(con) 
+dbSendQuery(con,'SET NAMES gbk')
+original_equity_data <- dbGetQuery(con,"select * from equity_table;")
+original_A_equity_data <- dbGetQuery(con,"select * from a_equity_table;")
+original_H_equity_data <- dbGetQuery(con,"select * from h_equity_table;")
+original_index_dt_final <- dbGetQuery(con,"select * from index_table;")
+equity.ratio.df <- dbGetQuery(con,"select * from ratio_table;")
+dbDisconnect(con)
+### Parameters needed 
+date.list = unique(equity.ratio.df$date)
+total.ticker.list = unique(original_equity_data$seccode)
+# trading.date.list = sort(unique(original_equity_data$date))
+A_share_indexes_length = length(c(basic.index,sw.industry.indexes))
+H_share_indexes_length = length(c(hs.index))
+all_indexes = c(basic.index,sw.industry.indexes,hs.index)
+all_indexes_length = length(all_indexes)    
+fund.name.list <- unique(equity.ratio.df$name)
+## Data set made up
+index_name = w.wss(all_indexes,'SEC_NAME')$Data  # Cache index name data from WIND
+equity_name = w.wss(total.ticker.list,'SEC_NAME')$Data # Cache equity name data from WIND
+equity_dt_final = merge(original_equity_data, equity_name, by.x = "seccode", by.y = "CODE", all.x = TRUE)
+equity_dt_final = equity_dt_final[equity_dt_final$date %in% date.list,] # date.list
+setorder(original_index_dt_final, seccode, date)
+original_index_dt_final = merge(original_index_dt_final, index_name,by.x = "seccode", by.y = "CODE", all.x = TRUE)
+index_dt_final = original_index_dt_final[original_index_dt_final$date %in% date.list,] # date.list
+index_day_list = unique(index_dt_final$date)
+
+date.intersec = intersect(index_day_list, original_A_equity_data$date) # Find the period inetersection for ratio and equity (index)
+temp.all.days.list = sort(as.factor(date.intersec))
+temp.all.equities.ticker.list = unique(original_equity_data$seccode)
+all.days.list = rep(temp.all.days.list, length(temp.all.equities.ticker.list))
+all.equities.ticker.list = rep(temp.all.equities.ticker.list, each = length(temp.all.days.list))
+ticker.and.date.df = data.frame(seccode = all.equities.ticker.list, date = all.days.list)
+modified_original_equity_data = subset(original_equity_data, select = -row_names)
+modified2_original_equity_data = merge(ticker.and.date.df, modified_original_equity_data, by.x = c("seccode","date"), by.y = c("seccode","date"), all.x = TRUE)
+
+### Time parameters
+date.list = sort(date.intersec)
+if (length(date.list) < 570){ # date.list
+  process_period = ceiling(length(date.list)/2) # date.list
+  review_period =floor(length(date.list)/2) # date.list
+} else {
+  process_period = 285
+  review_period = 285
+}
+total_days = process_period + review_period 
+# data_end_day = as.Date(date.list[length(date.list)]) # date.list
+data_end_day = date.list[length(date.list)]
+data_start_day = date.list[length(date.list)-total_days+1]
+# Other Time parameters needed
+process_start_day = review_period + 1
+
+# Period selection (select recent 570 days if it is enough, or take as long as it can)
+index_dt_final = as.data.table(index_dt_final)
+selected_index_dt_final = index_dt_final[, .SD[which(date.list == data_start_day): length(date.list)], by = seccode]
+
+### Index data calculation
+if (Index_calculation ==T){
+  temp_list = Lambda.optimize(process_period, selected_index_dt_final, all_indexes_length)
+  lambda.var.list = temp_list$lambda.var.list
+  lambda.cov.list = temp_list$lambda.cov.list
+  name_list = temp_list$name
+  length_name = temp_list$length_name
+  
+  temp_list = Index.var.cov.calculation(selected_index_dt_final, process_period, name_list)
+  full_data = temp_list$full_data
+  setorder(full_data, seccode, date)
+  final_data = temp_list$final_data
+  cov_df = temp_list$cov_df
+  cov.list = temp_list$cov.list
+}
+
+
+# for (name.number in 1:1){
+  # length(fund.name.list)
+  name.number = 47
+  print(fund.name.list[name.number])
+  # Delete this part?
+  temp.equity.ratio.df = equity.ratio.df[equity.ratio.df$date==date.list[length(unique(date.list))]&equity.ratio.df$name==fund.name.list[name.number]&equity.ratio.df$seccode!="166015",] # get the last days' ratio
+  sum.equity.ratio.df = as.data.table(temp.equity.ratio.df)[, sum(ratio),by = seccode]
+  unique.equity.ratio.df = unique(as.data.table(temp.equity.ratio.df),by="seccode")
+  unique.equity.ratio.df$ratio = sum.equity.ratio.df$V1
+  modified.equity.ratio.df = unique.equity.ratio.df
+  setorder(modified.equity.ratio.df, -ratio)
+  # end
+  ticker.list = modified.equity.ratio.df$seccode #  ??? Why there is an auto-setting order after setorder
+  equity_total_ratio = as.data.table(modified.equity.ratio.df)[name==fund.name.list[name.number],sum(ratio)]
+  if (length(modified.equity.ratio.df$ratio)>=10){
+    Top.10.weight = sum(modified.equity.ratio.df$ratio[1:10]) # if not enough 10?
+  } else{
+    Top.10.weight = sum(modified.equity.ratio.df$ratio[1:length(modified.equity.ratio.df$ratio)]) 
+  }
+
+  print (paste0("total equities' ratio = ", equity_total_ratio))
+  print (paste0("Top 10 equities' ratio = ", c(Top.10.weight/equity_total_ratio)))
+
+  # Equity logreturn
+  temp_list = equity.logr.calculation(modified2_original_equity_data)
+  equity_ticker_list = as.character(temp_list$equity_ticker_list) # This list is shorter than the "ticker.list",
+  equity_length_ticker = temp_list$equity_length_ticker
+  data_equity = temp_list$data_equity
+  final_data_equity =temp_list$final_data_equity # Do we need all days? No
+  setorder(final_data_equity, seccode, date)
+
+  # Filling data (EM or Index)
+  # applied.date.list = sort(unique(final_data_equity$date))
+  applied.date.list = sort(unique(final_data_equity$date))
+  EM.temp.list= EM.Missing.data.process(final_data_equity,review_period,equity_ticker_list,equity_length_ticker, applied.date.list) # Check HK equity regression
+  amelia.imputed = EM.temp.list$amelia.imputed
+  index.of.absolutely.deleted.ticker = EM.temp.list$index.of.absolutely.deleted.ticker
+  # Regression
+  temp_list = regression(process_period, final_data, amelia.imputed, final_data_equity)
+  m_equity_ticker_list = temp_list$m_equity_ticker_list
+  m_equity_length_name = temp_list$m_equity_length_name
+  coef_df = temp_list$coef_df
+
+  # VaR Calculation
+  VaR_temp_list = VaR_Calculation(process_period, all_indexes_length, coef_df)
+  VaR.95 = VaR_temp_list$VaR.95
+  VaR.99 = VaR_temp_list$VaR.99
+  cov.mat = VaR_temp_list$cov.mat
+  omega = VaR_temp_list$omega
+  
+  # Risk Decomposition
+  equity.weight.table = Decompose(m_equity_ticker_list, m_equity_length_name, coef_df, cov.mat, omega, weight, VaR.95)
+  # Show the result
+  kable(equity.weight.table[1:9],caption = "Compare Result")
+  kable(equity.weight.table[10:18],caption = "Compare Result")  
+  
+  df <- data.frame(Tickers = colnames(equity.weight.table), VaR_Ratio = as.numeric(equity.weight.table[1,]))
+  df <- merge(df, equity_name, by.x = "Tickers", by.y = "CODE", all.x = TRUE)
+  ggplot(df, aes(SEC_NAME, VaR_Ratio)) +
+  geom_col()+ 
+    theme( axis.text.x = element_text(size = 12,angle = 45,hjust = 1))
+  # Backtest()
+# }
+# dbDisconnect(con)
+```
+# Backtest function version
+```{r}
+var_list = c()
+var_list.99 = c()
+port_rt_list = c()
+for (day.to.view in 1:process_period){
+  # day.to.view = 1
+  # Create needed data
+  day.to.view.in.list = temp.all.days.list[length(temp.all.days.list)-day.to.view]
+  start_day_for_selected_day = temp.all.days.list[length(temp.all.days.list)-day.to.view - total_days +1]
+
+  # all_days[start_day_for_selected_day_index]
+  # Modify the ratio, in case that same ticker different market
+  # sort(unique(equity.ratio.df$date))
+  temp.equity.ratio.df = equity.ratio.df[equity.ratio.df$date==day.to.view.in.list & equity.ratio.df$name==fund.name.list[name.number] & equity.ratio.df$seccode!="166015",]
+  # equity.ratio.df[equity.ratio.df$date==day.to.view.in.list,]
+  if (dim(temp.equity.ratio.df)[1] ==0){
+    port_rt_list = append(port_rt_list,0)
+    var_list = append(var_list,0)
+    var_list.99 = append(var_list.99,0)
+    next
+  }
+  sum.equity.ratio.df = as.data.table(temp.equity.ratio.df)[, sum(ratio),by = seccode]
+  unique.equity.ratio.df = unique(as.data.table(temp.equity.ratio.df),by="seccode")
+  unique.equity.ratio.df$ratio = sum.equity.ratio.df$V1
+  modified.equity.ratio.df = unique.equity.ratio.df # hold ratio
+  setorder(modified.equity.ratio.df, -ratio)
+  ticker.list = modified.equity.ratio.df$seccode 
+  equity_dt_final_select_day = equity_dt_final[equity_dt_final$date == day.to.view.in.list & equity_dt_final$seccode %in% ticker.list,]
+  ratio_list = merge(equity_dt_final_select_day, modified.equity.ratio.df[,c("seccode","ratio")], by.x = "seccode", by.y = "seccode", all.x = TRUE)$ratio
+  port_rt_in_selected_day = equity_dt_final_select_day$logreturn_T0 %*% t(t(ratio_list))
+  port_rt_list = append(port_rt_list,port_rt_in_selected_day)  # The true return list everyday 
+  
+  # Select period for equities
+  temp_equity_ticker_list <- as.character(equity_dt_final_select_day$seccode)
+  temp_weight <- ratio_list
+  temp_equity_ticker_list_length = length(temp_equity_ticker_list)
+  selected_equity_data = modified2_original_equity_data[modified2_original_equity_data$seccode %in% temp_equity_ticker_list,]
+  setorder(selected_equity_data, seccode, date)
+  applied.all.days = unique(selected_equity_data$date)
+  day.to.view.in.list.index =  which(as.character(applied.all.days) == day.to.view.in.list)
+  applied.days = applied.all.days[c(day.to.view.in.list.index-total_days+1):day.to.view.in.list.index]
+  selected_applied_equity_data = as.data.table(selected_equity_data)[, .SD[c(day.to.view.in.list.index-total_days+1):day.to.view.in.list.index],by = seccode]
+  final_data_equity_copy = as.data.table(selected_applied_equity_data)
+  
+  # Select period for indexes
+  # Period selection (select recent 570 days if it is enough, or take as long as it can)
+  selected_index_dt_final = index_dt_final[, .SD[c(day.to.view.in.list.index-total_days+1): day.to.view.in.list.index], by = seccode]
+  
+  if (Index_calculation ==T){
+    temp_list = Lambda.optimize(process_period, selected_index_dt_final, all_indexes_length)
+    lambda.var.list = temp_list$lambda.var.list
+    lambda.cov.list = temp_list$lambda.cov.list
+    name_list = temp_list$name
+    length_name = temp_list$length_name
+    
+    temp_list = Index.var.cov.calculation(selected_index_dt_final, process_period, name_list)
+    full_data = temp_list$full_data
+    setorder(full_data, seccode, date)
+    final_data = temp_list$final_data
+    cov_df = temp_list$cov_df
+    cov.list = temp_list$cov.list
+  }
+
+  
+  full_equity_df = data.frame(matrix(numeric(0),nrow=c(process_period)))
+  EM.list = EM.Missing.data.process(final_data_equity_copy,0,temp_equity_ticker_list,temp_equity_ticker_list_length, applied.days) # 9 tickers ? need all period? 
+  full_equity_df = EM.list$amelia.imputed
+  index.of.absolutely.deleted.ticker = EM.list$index.of.absolutely.deleted.ticker
+  # full_equity_m = as.matrix(full_equity_df)
+  # filling.tikcer.list = colnames(full_equity_m)
+  
+  temp_list = regression(process_period, final_data, full_equity_df, final_data_equity_copy)
+  m_equity_ticker_list = temp_list$m_equity_ticker_list
+  m_equity_length_name = temp_list$m_equity_length_name
+  coef_df = temp_list$coef_df
+  
+  VaR_temp_list = VaR_Calculation(process_period, all_indexes_length, coef_df)
+  VaR.95 = VaR_temp_list$VaR.95
+  VaR.99 = VaR_temp_list$VaR.99
+  cov.mat = VaR_temp_list$cov.mat
+  omega = VaR_temp_list$omega
+  
+  
+}
+
+```
+
+
+# Backtest
+```{r, eval=FALSE, fig.height=4, fig.width=8, include=FALSE}
+var_list = c()
+var_list.99 = c()
+port_rt_list = c()
+# temp.all.days.list = sort(as.factor(date.intersec))
+# temp.all.equities.ticker.list = unique(original_equity_data$seccode)
+# all.days.list = rep(temp.all.days.list, length(temp.all.equities.ticker.list))
+# all.equities.ticker.list = rep(temp.all.equities.ticker.list, each = length(temp.all.days.list))
+# ticker.and.date.df = data.frame(seccode = all.equities.ticker.list, date = all.days.list)
+# modified_original_equity_data = subset(original_equity_data, select = -row_names)
+# modified2_original_equity_data = merge(ticker.and.date.df, modified_original_equity_data, by.x = c("seccode","date"), by.y = c("seccode","date"), all.x = TRUE)
+for (day.to.view in 1:process_period){
+  # Time parameter
+  # day.to.view = 1   
+  day.to.view.in.list = temp.all.days.list[length(temp.all.days.list)-day.to.view]
+  start_day_for_selected_day = temp.all.days.list[length(temp.all.days.list)-day.to.view - total_days +1]
+
+  # all_days[start_day_for_selected_day_index]
+  # Modify the ratio, in case that same ticker different market
+  sort(unique(equity.ratio.df$date))
+  temp.equity.ratio.df = equity.ratio.df[equity.ratio.df$date==day.to.view.in.list & equity.ratio.df$name==fund.name.list[name.number] & equity.ratio.df$seccode!="166015",]
+  # equity.ratio.df[equity.ratio.df$date==day.to.view.in.list,]
+  if (dim(temp.equity.ratio.df)[1] ==0){
+    port_rt_list = append(port_rt_list,0)
+    var_list = append(var_list,0)
+    var_list.99 = append(var_list.99,0)
+    next
+  }
+  sum.equity.ratio.df = as.data.table(temp.equity.ratio.df)[, sum(ratio),by = seccode]
+  unique.equity.ratio.df = unique(as.data.table(temp.equity.ratio.df),by="seccode")
+  unique.equity.ratio.df$ratio = sum.equity.ratio.df$V1
+  modified.equity.ratio.df = unique.equity.ratio.df # hold ratio
+  setorder(modified.equity.ratio.df, -ratio)
+  # Today = as.Date(unique(modified.equity.ratio.df[modified.equity.ratio.df$name==fund.name.list[name.number],]$date))
+  # Get other parameters
+  ticker.list = modified.equity.ratio.df$seccode #  ??? Why there is an auto-setting order after setorder
+  # Get selected day's portfolio return
+  equity_dt_final_select_day = equity_dt_final[equity_dt_final$date == day.to.view.in.list & equity_dt_final$seccode %in% ticker.list,]
+  ratio_list = merge(equity_dt_final_select_day, modified.equity.ratio.df[,c("seccode","ratio")], by.x = "seccode", by.y = "seccode", all.x = TRUE)$ratio
+  port_rt_in_selected_day = equity_dt_final_select_day$logreturn_T0 %*% t(t(ratio_list))
+  
+  # Append to the portfolio return list
+  port_rt_list = append(port_rt_list,port_rt_in_selected_day)
+  
+# }
+  
+  # Omega series
+  temp_equity_ticker_list <- as.character(equity_dt_final_select_day$seccode)
+    # dim(modified.equity.ratio.df[ticker.list %in% temp_equity_ticker_list,])[1]
+  temp_weight <- ratio_list
+  temp_equity_ticker_list_length = length(temp_equity_ticker_list)
+  selected_equity_data = modified2_original_equity_data[modified2_original_equity_data$seccode %in% temp_equity_ticker_list,]
+  setorder(selected_equity_data, seccode, date)
+  applied.all.days = unique(selected_equity_data$date)
+  day.to.view.in.list.index =  which(as.character(applied.all.days) == day.to.view.in.list)
+  applied.days = applied.all.days[c(day.to.view.in.list.index-569):day.to.view.in.list.index]
+  
+  # start_day_for_selected_day_index = which(applied.all.days == start_day_for_selected_day)
+
+  # selected_equity_data[start_day_for_selected_day_index,]
+  selected_applied_equity_data = as.data.table(selected_equity_data)[, .SD[c(day.to.view.in.list.index-569):day.to.view.in.list.index],by = seccode]
+  # selected_equity_data[selected_equity_data$seccode =="603883.SH",]
+  # Order the NA for new equities
+  # selected_applied_equity_data = selected_applied_equity_data[order(seccode,date,na.last = F)]
+  
+  full_equity_df = data.frame(matrix(numeric(0),nrow=c(process_period)))
+  final_data_equity_copy = as.data.table(selected_applied_equity_data) # data table final data
+   
+  EM.list = EM.Missing.data.process(final_data_equity_copy,0,temp_equity_ticker_list,temp_equity_ticker_list_length, applied.days) # 9 tickers ? need all period? 
+  full_equity_df = EM.list$amelia.imputed
+  index.of.absolutely.deleted.ticker = EM.list$index.of.absolutely.deleted.ticker
+  full_equity_m = as.matrix(full_equity_df)
+  filling.tikcer.list = colnames(full_equity_m)
+  # temp_equity_ticker_list[!temp_equity_ticker_list %in% colnames(full_equity_df)]
+  # selected_applied_equity_data[selected_applied_equity_data$seccode =="300146.SZ",]
+  full_index_df = data.frame(matrix(numeric(0),nrow=c(total_days)))
+  for (i in (1:length_name)){
+    # i = 1
+    full_index_df[paste(name_list[i])] = original_index_dt_final[original_index_dt_final$SEC_NAME==name_list[i],][c(day.to.view.in.list.index-569):day.to.view.in.list.index,]$logreturn_T0
+  }
+  
+  final_full_index_df = sapply(1:c(length(full_index_df)), function(x) if(x==1 | x > length(A_share_indexes_length)){full_index_df[,x] = full_index_df[,x]}else{full_index_df[,x] = full_index_df[,x] - full_index_df[,1]}) # Calculate excess earnings
+  colnames(final_full_index_df) = name_list
+  
+  colnames(final_full_index_df) = gsub("\\(申万\\)","",colnames(full_index_df))
+  full_index_m = as.matrix(final_full_index_df)
+
+  
+  # Calculate the VaR series
+  # left_length = process_period + 1
+  
+  # Correlation matrix 
+  # for (m in (1:c(left_length-1))){ # "left_length-1" here since we only have 183 sample for "cor_df" (182 for "final_data"), we cannot minus all of them.
+    m = 1
+    try_left_length = process_period + 1 - m
+    cor.mat = matrix(0,length_name, length_name)
+    cor.mat[1,1] = 1
+    for (i in (2:length_name)){
+      cor.mat[i,i] = 1
+      if (i <= A_share_indexes_length){
+        # for (j in (c(i-1):1)){
+        j = 1
+        cor.mat[i,j] = cor.mat[j,i] = cov_df[paste("cov",i,j,sep="")][try_left_length+1,]/(sqrt(final_data[final_data$SEC_NAME==name_list[i]]$RVar_T1[try_left_length])*sqrt(final_data[final_data$SEC_NAME==name_list[j]]$RVar_T1[try_left_length])) #cov_df[1] is day 186, final_data[1] is day 187, so we do "try_left_length+1" here
+        # }
+      } else if (i > c(A_share_indexes_length+1)){
+          # for (j in (c(i-1):1)){
+        j = 1
+          cor.mat[i,j] = cor.mat[j,i] = cov_df[paste("cov",i,j,sep="")][try_left_length+1,]/(sqrt(final_data[final_data$SEC_NAME==name_list[i]]$RVar_T1[try_left_length])*sqrt(final_data[final_data$SEC_NAME==name_list[j]]$RVar_T1[try_left_length])) #cov_df[1] is day 186, final_data[1] is day 187, so we do "try_left_length+1" here
+          # }        
+      }
+
+    }
+    
+    # Coefficient dataframe
+    coef_df = data.frame(matrix(nrow =all_indexes_length ,ncol = length(filling.tikcer.list)))
+    colnames(coef_df) = colnames(full_equity_df)
+    rownames(coef_df) = colnames(full_index_m)
+    coef_df[is.na(coef_df)] <- 0
+    
+    full_my_lms = sapply(1:length(filling.tikcer.list), function(x) lm(full_equity_m[c(total_days-c(process_period-1)-m):c(total_days+1-m),x] ~ 0 + if (!str_detect(temp_equity_ticker_list[x],"HK")){
+    cbind(full_index_m[c(total_days-c(process_period-1)-m):c(total_days+1-m),1:length(basic.index)],full_index_m[c(total_days-c(process_period-1)-m):c(total_days+1-m), unique(final_data_equity_copy[final_data_equity_copy$seccode == filling.tikcer.list[x] & !is.na(final_data_equity_copy$INDUSTRIESNAME),]$INDUSTRIESNAME)])
+    }else{
+      # print (2)
+      full_index_m[c(total_days-c(process_period-1)-m):c(total_days+1-m),c(A_share_indexes_length+1):all_indexes_length]
+      }, 
+    na.action = na.omit)$coef) 
+    
+
+    H_shares_number = which(!str_detect(temp_equity_ticker_list,"HK") == F)
+    for (reg.number in 1:length(filling.tikcer.list)){
+       if (!reg.number %in% H_shares_number){
+        coef_df[1:length(basic.index),reg.number] = t(t(as.numeric(full_my_lms[[reg.number]])[1:length(basic.index)]))
+        coef_df[unique(final_data_equity_copy[final_data_equity_copy$seccode == filling.tikcer.list[reg.number] &  !is.na(final_data_equity_copy$INDUSTRIESNAME),]$INDUSTRIESNAME),reg.number] = full_my_lms[[reg.number]][[length(full_my_lms[[reg.number]])]]
+       } else {
+         coef_df[c(A_share_indexes_length+1):all_indexes_length,reg.number] = t(t(as.numeric(full_my_lms[[reg.number]])))
+       }
+    }
+    if (!is.null(index.of.absolutely.deleted.ticker)){
+      final_weight = temp_weight[-index.of.absolutely.deleted.ticker]
+    } else{
+      final_weight = temp_weight
+    }
+
+    omega = final_weight%*%t(as.matrix(coef_df))
+    # std.times.omega = 1.65*omega*sqrt(cov.list)
+    cov.mat = t(t(sqrt(cov.list)))%*%sqrt(cov.list)*cor.mat
+    VaR = sqrt(c(1.65*omega)%*%cov.mat%*%c(1.65*omega))
+    # VaR = sqrt(std.times.omega%*%cor.mat%*%t(std.times.omega))
+    var_list = append(var_list,VaR)
+    rev(var_list)
+    var_list.99 = append(var_list.99,2.33/1.65*VaR)
+  # }
+}
+
+  x  <- seq(1, process_period, length.out =process_period)
+  plot(x,port_rt_list,type="p",col="red")
+  lines(x,-rev(var_list),col="green")
+  lines(x,-rev(var_list)*2.33/1.65,col="darkgreen")
+# }
+```
+
+
+# EWMA formula
+```{r}
+EWMA <- function(init_d, lamd, logr){
+  sum_return = 0
+  sum_lambda = 0
+  logr_mean = mean(logr[1:init_d])
+  for (i in (1:init_d)){
+    temp = (lamd**(init_d-i))*((logr[i] - logr_mean)**2)
+    sum_return = sum_return + temp
+    sum_lambda = sum_lambda + c(lamd**(i-1))
+  }
+  sigma = sum_return/sum_lambda
+  return(sigma) # Output sigma square
+}
+
+
+# Covar -- Covariance for pairs
+Covar <- function(init_d, lamd, logr1, logr2){
+  sum_return =0
+  sum_lambda =0
+  logr1_mean = mean(logr1[1:init_d])
+  logr2_mean = mean(logr2[1:init_d])
+  for (i in (1:init_d)){
+    temp = (lamd**(init_d-i))*((logr1[i] - logr1_mean)*(logr2[i] - logr2_mean))
+    sum_return = sum_return + temp
+    sum_lambda = sum_lambda + c(lamd**(i-1))
+  }
+  sigma = sum_return/sum_lambda
+  return(sigma)
+}
+```
+
+# Lambda index
+```{r}
+# Lambda optimize
+Lambda.optimize <- function(process_period, index_dt_final, all_indexes_length){
+  ### Period selection
+  # index_dt_final1 = index_dt_final
+  # index_dt_final = selected_index_dt_final
+  ### parameter input
+  RMSE.period = process_period-1
+  ###
+  lambda.range <- seq(0.90, 0.999, by = 0.01)
+  RMSE.return = data.frame(matrix(numeric(0),nrow = RMSE.period))
+  RMSE.var = data.frame(matrix(numeric(0),nrow = RMSE.period))
+  RMSE = data.frame(matrix(numeric(0),nrow = length(lambda.range)))
+  RMSE.cov = data.frame(matrix(numeric(0),nrow = length(lambda.range)))
+  temp_coreturn_df = data.frame(matrix(numeric(0),nrow=c(RMSE.period)))
+  temp_cov_df = data.frame(matrix(numeric(0),nrow=c(process_period+1)))
+    for (l in (1:length(lambda.range))){
+      # l = 2
+      ### loop parameter input
+      lambda_data = as.data.table(index_dt_final)
+      all_indexes_length = all_indexes_length
+      ###
+  
+      # Needed parameter in calculation
+      # lambda_data$logreturn_T0 = 0
+      lambda_data$RVar_T1 = 0
+      # cov_df = data.frame(matrix(numeric(0),nrow=c(total_days-review_period+1)))
+      name_list <<- unique(lambda_data$SEC_NAME)
+      length_name <<- all_indexes_length
+      # Calculation
+      for (j in (1:length_name)){
+        # j = 1
+        data_temp = lambda_data[lambda_data$SEC_NAME %in% name_list[j],]
+        # data_temp$logreturn_T0[1] = log(data_temp$CLOSE[1]/data_temp$PRE_CLOSE[1])
+  
+        # First period -- calculate the variance in the "first day"
+        ## Calculate the return of every day
+        # for (i in (2:total_days)){
+        #   data_temp$logreturn_T0[i] = log(data_temp$CLOSE[i]/data_temp$CLOSE[i-1])
+        # }
+  
+        ## Calculate the variance of the "first day"
+        day1_ewma = EWMA(review_period,lambda.range[l],data_temp$logreturn_T0)
+        data_temp$RVar_T1[review_period] = day1_ewma
+  
+        for (d in (process_start_day:total_days)){
+          # data_temp$logreturn_T0[d] = log(data_temp$CLOSE[d]/data_temp$CLOSE[d-1])
+          data_temp$RVar_T1[d] = lambda.range[l]*data_temp$RVar_T1[d-1] +(1-lambda.range[l])*(data_temp$logreturn_T0[d]**2)
+        }
+        lambda_data[lambda_data$SEC_NAME %in% name_list[j],] = data_temp
+  
+        # Calculate the covariance
+        if (j > 1 & j <= A_share_indexes_length){
+            m = 1
+            # print (m)
+            temp_cov_df[paste("cov",j,m,sep ="")] = 0
+            temp_cov_df[paste("cov",j,m,sep ="")][1,] = Covar(review_period, lambda.range[l], data_temp$logreturn_T0,lambda_data[lambda_data$SEC_NAME %in% name_list[m],]$logreturn_T0)
+            for (z in (2:c(process_period+1))){
+              temp_cov_df[paste("cov",j,m,sep ="")][z,] =(lambda.range[l]*temp_cov_df[paste("cov",j,m,sep="")][c(z-1),])+((1-lambda.range[l])*(data_temp$logreturn_T0[z+process_start_day-2]*(lambda_data[lambda_data$SEC_NAME %in% name_list[m],]$logreturn_T0[z+process_start_day-2])))
+            }
+        } else if(j > c(A_share_indexes_length+1)){
+          for (m in (c(j-1):c(A_share_indexes_length+1))){
+            # print (m)
+            temp_cov_df[paste("cov",j,m,sep ="")] = 0
+            temp_cov_df[paste("cov",j,m,sep ="")][1,] = Covar(review_period, lambda.range[l], data_temp$logreturn_T0,lambda_data[lambda_data$SEC_NAME %in% name_list[m],]$logreturn_T0)
+            for (z in (2:c(process_period+1))){
+              temp_cov_df[paste("cov",j,m,sep ="")][z,] =(lambda.range[l]*temp_cov_df[paste("cov",j,m,sep="")][c(z-1),])+((1-lambda.range[l])*(data_temp$logreturn_T0[z+process_start_day-2]*(lambda_data[lambda_data$SEC_NAME %in% name_list[m],]$logreturn_T0[z+process_start_day-2])))
+            }
+          }
+        }
+      }
+  
+      final_data_temp = lambda_data[, .SD[process_start_day:total_days],by = SEC_NAME]
+      index.return.list = final_data_temp[, .SD[2:process_period], by = SEC_NAME]$logreturn_T0 # Consider t0 forecast
+      index.var.list = final_data_temp[, .SD[1:c(process_period-1)], by = SEC_NAME]$RVar_T1 # Consider time t forecast rather than time t+1
+      final_cov_df = temp_cov_df[2:process_period,] # 187 dates include t0 and tT+1, we need t1 to tT
+      # Calculate co-return to calculate RMSE
+      for (a in (1:length(name_list))){ # 赋值次数太多
+        RMSE.return[name_list[a]] = index.return.list[c(1+RMSE.period*(a-1)):c(RMSE.period*a)]
+        if (a > 1 & a <= A_share_indexes_length){
+          # for (n in (c(a-1):1)){
+            n = 1
+            temp_coreturn_df[paste("return",a,n,sep="")] = RMSE.return[name_list[a]] * RMSE.return[name_list[n]]
+          # }
+        } else if (a > c(A_share_indexes_length+1)){
+          for (n in (c(a-1):c(A_share_indexes_length+1))){
+            temp_coreturn_df[paste("return",a,n,sep="")] = RMSE.return[name_list[a]] * RMSE.return[name_list[n]]
+          }
+        }
+        RMSE.var[name_list[a]] = index.var.list[c(1+RMSE.period*(a-1)):c(RMSE.period*a)]
+        error = sqrt(sum((RMSE.return[,a]**2 - RMSE.var[,a])**2)/RMSE.period)
+        # plot(RMSE.return[,a]**2)
+        # lines(RMSE.var[,a])
+        RMSE[l,a] = error # "l" states different lambda, "a" states different indexes
+      }
+      if (length(colnames(temp_coreturn_df))>0){
+        for (c in (1:length(colnames(temp_coreturn_df)))){
+          RMSE.cov[l,c] = sqrt(sum((temp_coreturn_df[,c] - final_cov_df[,c])**2)/RMSE.period)
+        }
+      }
+  
+    }
+    colnames(RMSE) = name_list
+    colnames(RMSE.cov) = colnames(temp_coreturn_df) # !!!!!!!WAIT TO CHANGE
+    # RMSE
+    lambda.var.list =c()
+    lambda.cov.list =c()
+    for (b in (1:length(name_list))){
+      temp_var_index= which(RMSE[,b] == min(RMSE[,b]))
+      lambda.var.list=cbind(lambda.var.list, lambda.range[temp_var_index])
+    }
+    if (length(colnames(RMSE.cov))>0){
+      for (k in (1:length(colnames(RMSE.cov)))){
+        temp_cov_index= which(RMSE.cov[,k] == min(RMSE.cov[,k]))
+        lambda.cov.list=cbind(lambda.cov.list, lambda.range[temp_cov_index])
+      }
+    }
+    lambda.var.list <- as.numeric(lambda.var.list)
+    if (is.null(lambda.cov.list) == F){
+      lambda.cov.list <- as.numeric(lambda.cov.list)
+    }
+    print(lambda.var.list)
+    print(lambda.cov.list)
+    final_list = list(lambda.var.list = lambda.var.list, lambda.cov.list = lambda.cov.list, name_list = name_list, length_name = length_name)
+  return(final_list)
+}
+# Lambda.optimize(process_period, index_dt_final, all_indexes_length)
+```
+
+# Equity_logreturn
+```{r}
+# Equity logreturn calculation
+equity.logr.calculation <- function(modified2_original_equity_data){
+  # Build parameters needed
+  # ticker.list[!ticker.list %in% unique(modified2_original_equity_data$seccode)]
+  data_equity = modified2_original_equity_data[modified2_original_equity_data$seccode %in% ticker.list,]
+  data_equity$seccode = as.factor(data_equity$seccode)
+  # equity_name = c(as.character(unique(data_equity$seccode)))
+  equity_ticker_list <- as.character(unique(data_equity$seccode))
+  equity_length_ticker <- length(equity_ticker_list)
+  temp_date_list = sort(unique(data_equity$date))
+
+  # Calculation the return
+  setorder(data_equity,seccode, date)
+  final_data_equity <- as.data.table(data_equity)[, .SD[c(length(temp_date_list)-process_period+1):length(temp_date_list)],by = seccode]
+  final_list = list(equity_ticker_list = equity_ticker_list,equity_length_ticker = equity_length_ticker,data_equity = data_equity,final_data_equity = final_data_equity)
+  return(final_list)
+}
+```
+
+
+# Filling the missing data
+```{r}
+# Filling the missing value (When having maxupordown, change back the comments)
+## Method 1: EM algorithm
+EM.Missing.data.process <- function(final_data_equity, review_period, equity_ticker_list, equity_length_ticker, applied.date.list){
+  # library(stringr,warn.conflicts=F)
+  # library(amelia,warn.conflicts=F)
+  # Dealing with new equities
+  ## Create IPO date list
+  
+  # final_data_equity1 = final_data_equity
+  # review_period1 = review_period
+  # equity_ticker_list1 = equity_ticker_list
+  # equity_length_ticker1 = equity_length_ticker
+  # date.list1 = applied.date.list
+  # 
+  # final_data_equity = final_data_equity_copy
+  # review_period = 0
+  # equity_ticker_list = temp_equity_ticker_list
+  # equity_length_ticker = temp_equity_ticker_list_length
+  # applied.date.list = applied.days
+  # 
+  # final_data_equity = final_data_equity1
+  # review_period = review_period1
+  # equity_ticker_list = equity_ticker_list1
+  # equity_length_ticker = equity_length_ticker1
+
+  # IPO.Date.list =  unique(final_data_equity[!is.na(unique(final_data_equity[,c("seccode","ipo_date")])),]$ipo_date)
+  temp.ipo.df = unique(final_data_equity[,c("seccode","ipo_date")])
+  IPO.Date.list = temp.ipo.df[!is.na(temp.ipo.df$ipo_date),]$ipo_date # H equities no ipo date
+  IPO.Date.list
+  
+  ## Delete limit-up part
+  temp_equity_df = data.frame(matrix(numeric(0),nrow=c(total_days-review_period)))
+  temp_equity_logr_df = data.frame(matrix(numeric(0),nrow=c(total_days-review_period)))
+  for (i in (1:equity_length_ticker)){
+    # i = 8
+    # final_data_equity[final_data_equity$seccode %in% equity_ticker_list,] 
+    temp_equity_df[,as.character(equity_ticker_list[i])] = final_data_equity[final_data_equity$seccode==equity_ticker_list[i],]$maxupordown
+    # data_equity[data_equity$seccode==equity_ticker_list[i],]$maxupordown
+    temp_equity_logr_df[,as.character(equity_ticker_list[i])] = final_data_equity[final_data_equity$seccode==equity_ticker_list[i],]$logreturn_T0
+  }
+  # final_data_equity[final_data_equity$seccode == "300618.SZ",]
+  invalid_days_to_count = c()
+  ticker.to.delete = c()
+  
+  # Do something for A share new equities
+  equity_ticker_list_without_HK = equity_ticker_list[!str_detect(equity_ticker_list,"HK")]  # Delete HK. equities to match the "IPO.Date.list" 
+  for (i in 1:length(IPO.Date.list)){
+    # i = 10
+    if (!all(is.na(temp_equity_df[,as.character(equity_ticker_list_without_HK[i])]))){
+      # if (!all(temp_equity_df[,equity_ticker_list[i]]==0)){# boundary condition, stop all the time NA and HK share
+        all.profit = temp_equity_df[!is.na(temp_equity_df[,equity_ticker_list_without_HK[i]]),][,equity_ticker_list_without_HK[i]] # find new equities all profits
+        logic = c(all.profit == 0)
+        if (any(logic)){
+          if (as.factor(IPO.Date.list[i]) %in% applied.date.list){
+            # ipo.date.index = min(which(!is.na(temp_equity_df[,equity_ticker_list[i]]))) # find the day the equity goes pubish
+            ipo.date.index = min(which(!temp_equity_df[,equity_ticker_list_without_HK[i]]==0))
+            # temp_equity_df[,equity_ticker_list[i]][ipo.date.index]
+            temp.index = min(which(logic==TRUE)) # find the first day the equity becomes normal
+            begin.to.count.date = ipo.date.index + temp.index # which day begain to count
+            temp_equity_logr_df[,equity_ticker_list_without_HK[i]][1:c(begin.to.count.date-1)] = NA # filiing the value with EM or index return
+            invalid_days_to_count = append(invalid_days_to_count,c(begin.to.count.date-1))
+            ticker.to.delete = append(ticker.to.delete, equity_ticker_list_without_HK[i])
+          }
+        } else{
+          temp_equity_logr_df[,equity_ticker_list_without_HK[i]] = NA
+        }
+    }
+    
+  }
+  
+  # Delete the data with too many missing values
+  index.of.absolutely.deleted.ticker = c()
+  Missing.Data.cache = final_data_equity
+  for (ticker in equity_ticker_list){
+    # Missing.Data.cache[seccode==ticker]$logreturn_T0 = as.double(temp_equity_logr_df[,ticker])  ## Give the value to missing data cache
+    Missing.Data.cache[seccode==ticker][logreturn_T0==0]$logreturn_T0 = NA
+    missing.total = sum(is.na(Missing.Data.cache[seccode==ticker]$logreturn_T0))
+    if (missing.total > length(unique(Missing.Data.cache$date))/2){ #!!!!!!!! The boundary condition setting, "process_period" appropriate? No
+      Missing.Data.cache = Missing.Data.cache[!seccode==ticker,]
+      index.of.absolutely.deleted.ticker = append(index.of.absolutely.deleted.ticker,which(equity_ticker_list == ticker))
+    }
+  }
+
+  keep.ticker = unique(Missing.Data.cache$seccode)
+  Missing.Data.df = data.frame(matrix(Missing.Data.cache$logreturn_T0, ncol = length(keep.ticker)))
+  colnames(Missing.Data.df) = keep.ticker
+
+
+  ### Using Amelia
+  amelia.out <- amelia(Missing.Data.df, m = 1) # "m" is the number of imputed datasets to create
+  amelia.imputed <- amelia.out$imputations[[1]]
+  if (!is.null(ticker.to.delete)){
+    for (delete.ticker.return.number in 1:length(ticker.to.delete)){
+      if (ticker.to.delete[delete.ticker.return.number] %in% colnames(amelia.imputed)){
+       amelia.imputed[,ticker.to.delete[delete.ticker.return.number]][1:invalid_days_to_count[delete.ticker.return.number]] = NA 
+      }
+    }
+  }
+  return(list(amelia.imputed = amelia.imputed, index.of.absolutely.deleted.ticker = index.of.absolutely.deleted.ticker))
+}
+
+
+## Method 2: Using index (Notice: A share and H share)
+Index.Missing.data.process <- function(){
+  Left_equity_ticker = unique(Missing.Data.cache$WINDCODE)
+  for (equity.number in 1:length(colnames(Missing.Data.df))){
+    if (str_detect(Left_equity_ticker[equity.number],"HK")){
+      industry_of_equity = unique(final_data_equity[final_data_equity$SEC_NAME == equity.number,]$Industry_sw) # Find the equity's industry
+    } else{
+      industry_of_equity = unique(final_data_equity[final_data_equity$SEC_NAME == equity.number,]$Industry_sw_HS)
+    }
+    Missing.Data.df[is.na(Missing.Data.df[,equity.number]),] = index_df[is.na(Missing.Data.df[,equity.number]),industry_of_equity] # Filling in missing data with corresponding index data
+  }
+  return(Missing.Data.df)
+}
+```
+
+# Index var and cov calculation
+```{r}
+# Index var cov calculation
+Index.var.cov.calculation <- function(index_dt_final, process_period, name_list){
+  data = as.data.table(index_dt_final)
+  # Name as factor
+  data$SEC_NAME = as.factor(data$SEC_NAME)
+
+  # Needed parameter in calculation
+  # data$logreturn_T0 = 0
+  data$RVar_T1 = 0
+  cov_df = data.frame(matrix(numeric(0),nrow=c(process_period+1)))
+  name_list = as.character(unique(data$SEC_NAME))
+  length_name = length(name_list)
+
+  # Calculation
+  for (j in (1:length_name)){
+    data_temp = data[data$SEC_NAME %in% name_list[j],]
+    ## Calculate the first day variance in process period
+    day1_ewma = EWMA(review_period,lambda.var.list[j],data_temp$logreturn_T0)
+    data_temp$RVar_T1[review_period] = day1_ewma
+
+    ## Calculate all covariances in the process period
+    if (j > 1 & j <= A_share_indexes_length){
+      # for (m in (c(j-1):1)){
+        # j = 29
+        m = 1
+        cov_df[paste("cov",j,m,sep ="")] = 0
+        cov_df[paste("cov",j,m,sep ="")][1,] = Covar(review_period, lambda.cov.list[j-1], data_temp$logreturn_T0,data[data$SEC_NAME %in% name_list[m],]$logreturn_T0)
+        
+        for (z in (2:c(total_days-review_period+1))){
+          cov_df[paste("cov",j,m,sep ="")][z,] = lambda.cov.list[j-1]*cov_df[paste("cov",j,m,sep ="")][c(z-1),]+(1-lambda.cov.list[j-1])*(data_temp$logreturn_T0[z]*(data[data$SEC_NAME %in% name_list[m],]$logreturn_T0[z]))
+        # length(lambda.cov.list)
+        }
+    } else if (j > c(A_share_indexes_length+1)){
+      # for (m in (c(j-1):1)){
+        m = 1
+        cov_df[paste("cov",j,m,sep ="")] = 0
+        cov_df[paste("cov",j,m,sep ="")][1,] = Covar(review_period, lambda.cov.list[j-2], data_temp$logreturn_T0,data[data$SEC_NAME %in% name_list[m],]$logreturn_T0)
+        for (z in (2:c(total_days-review_period+1))){
+          cov_df[paste("cov",j,m,sep ="")][z,] = lambda.cov.list[j-2]*cov_df[paste("cov",j,m,sep ="")][c(z-1),]+(1-lambda.cov.list[j-2])*(data_temp$logreturn_T0[z]*(data[data$SEC_NAME %in% name_list[m],]$logreturn_T0[z]))
+        }
+    }
+
+    # Use the recursive formula to calculate variance every day
+    for (z in (process_start_day:total_days)){
+      # data_temp$logreturn_T0[z] = log(data_temp$CLOSE[z]/data_temp$CLOSE[z-1])
+      data_temp$RVar_T1[z] = lambda.var.list[j]*data_temp$RVar_T1[z-1] +(1-lambda.var.list[j])*(data_temp$logreturn_T0[z]**2)
+    }
+    data[data$SEC_NAME %in% name_list[j],] = data_temp
+  }
+  full_data <- data
+  final_data <- data[, .SD[process_start_day:total_days],by = SEC_NAME]
+  # cov_df <- cov_df
+  cov.list <- final_data[, .SD[c(total_days-review_period)], by = SEC_NAME]$RVar_T1
+  final_list = list(full_data = full_data, final_data = final_data, cov_df = cov_df, cov.list = cov.list)
+  return(final_list)
+}
+# Index.var.cov.calculation(index_dt_final, process_period, name_list)
+```
+
+# Regression part
+```{r}
+# Regression part
+regression <- function(process_period, final_data, amelia.inputed, final_data_equity){
+  # regression(process_period, final_data, amelia.imputed, final_data_equity)
+  # Construct logreturn series for indexes and equities
+  # amelia.inputed = backtest.amelia.imputed 
+  index_df = data.frame(matrix(numeric(0),nrow=c(process_period)))
+  for (i in (1:length_name)){
+    # loop parameter input
+    index_df[paste(name_list[i])] = final_data[SEC_NAME==name_list[i]]$logreturn_T0
+  }
+  
+  # Regression progress
+  final_index_df = sapply(1:c(length(index_df)), function(x) if(x==1 | x>length(A_share_indexes_length)){index_df[,x] = index_df[,x]}else{index_df[,x] = index_df[,x] - index_df[,1]}) # Calculate excess earnings
+  colnames(final_index_df) = name_list
+  index_m = as.matrix(final_index_df)
+  colnames(index_m) = gsub("\\(申万\\)","",colnames(index_m))
+  equity_df = amelia.imputed
+  ### The name list and name length after delete some equities
+  # m_equity_name_list <- unique(final_data_equity[final_data_equity$SEC_NAME %in% colnames(equity_df)]$SEC_NAME)
+  m_equity_ticker_list <- colnames(equity_df)
+  m_equity_length_name <- length(colnames(equity_df))
+  ##
+  coef_df = data.frame(matrix(nrow =all_indexes_length ,ncol = m_equity_length_name))
+  colnames(coef_df) = colnames(equity_df)
+  rownames(coef_df) = colnames(index_m)
+  coef_df[is.na(coef_df)] <- 0
+  my_lms = sapply(1:m_equity_length_name, function(x) lm(equity_df[,x] ~ 0 + if (!str_detect(m_equity_ticker_list[x],"HK")){
+    cbind(index_m[,1:length(basic.index)],index_m[,unique(final_data_equity[final_data_equity$seccode == m_equity_ticker_list[x] & !is.na(final_data_equity$INDUSTRIESNAME),]$INDUSTRIESNAME)])
+    # unique(final_data_equity[seccode==colnames(equity_df)[x]]$INDUSTRIESNAME)
+    
+    }else{
+      index_m[,c(A_share_indexes_length+1):all_indexes_length]
+      }, 
+    na.action = na.omit)$coef)  # Since the last day return is always 0
+  # if (!str_detect(m_equity_ticker_list[x],"HK")){
+  #   index_m[,1:A_share_indexes_length]
+  #   }else{index_m[,c(A_share_indexes_length+1):all_indexes_length]}
+  H_shares_number = which(!str_detect(m_equity_ticker_list,"HK") == F)
+  for (reg.number in 1:m_equity_length_name){
+    if (!reg.number %in% H_shares_number){
+      coef_df[1:length(basic.index),reg.number] = t(t(as.numeric(my_lms[[reg.number]])[1:length(basic.index)]))  # my_lms[,reg.number]
+      coef_df[unique(final_data_equity[final_data_equity$seccode == m_equity_ticker_list[reg.number] &  !is.na(final_data_equity$INDUSTRIESNAME),]$INDUSTRIESNAME),reg.number] = my_lms[[reg.number]][[length(my_lms[[reg.number]])]]
+       } else {
+         coef_df[c(A_share_indexes_length+1):all_indexes_length,reg.number] = t(t(as.numeric(my_lms[[reg.number]])))
+       }
+  }
+  final_list = list(m_equity_ticker_list = m_equity_ticker_list,m_equity_length_name = m_equity_length_name, coef_df = coef_df)
+  #m_equity_name_list = m_equity_name_list,
+  return(final_list)
+}
+```
+
+# Calculate VaR
+```{r}
+# Use indexes to calculate VaR
+VaR_Calculation <- function(process_period, all_indexes_length, coef_df){
+  ###
+  left_length = process_period + 1
+  # Construct the correlation matrix
+  cor.mat = matrix(0,all_indexes_length, all_indexes_length)
+  cor.mat[1,1] = 1
+  for (i in (2:length_name)){
+    cor.mat[i,i] = 1
+    if (i <= A_share_indexes_length){
+        j = 1
+        cor.mat[i,j] = cor.mat[j,i] = cov_df[paste("cov",i,j,sep ="")][left_length,]/(sqrt(cov.list[i])*sqrt(cov.list[j]))
+    } else if (i > c(A_share_indexes_length+1)){
+      for (j in (c(i-1):1)){
+        cor.mat[i,j] = cor.mat[j,i] = cov_df[paste("cov",i,j,sep ="")][left_length,]/(sqrt(cov.list[i])*sqrt(cov.list[j]))
+      }
+    }
+  }
+  # Replace process
+  # weight
+  weight_temp_list = modified.equity.ratio.df[modified.equity.ratio.df$seccode %in% m_equity_ticker_list,][,c("seccode","ratio")]
+  setorder(weight_temp_list, seccode)
+  weight <<-weight_temp_list$ratio
+  weight_squre = weight**2
+
+  ## Index weight (parameters)
+  omega = weight%*%t(as.matrix(coef_df))
+
+  ## VaR calculation
+  # std.times.omega = 1.65*omega*sqrt(cov.list)
+  # VaR.95 = sqrt(std.times.omega%*%cor.mat%*%t(std.times.omega))
+  cov.mat = t(t(sqrt(cov.list)))%*%sqrt(cov.list)*cor.mat
+  VaR.95 = sqrt(c(1.65*omega)%*%cov.mat%*%c(1.65*omega))
+  VaR.99 =2.33/1.65*VaR.95
+  final_list = list(VaR.95 = VaR.95, VaR.99 = VaR.99, cov.mat = cov.mat, omega = omega)
+  return(final_list)
+}
+
+```
+
+### Decompose
+```{r}
+### Decompose
+Decompose <- function(m_equity_ticker_list, m_equity_length_name, coef_df, cov.mat, omega, weight, VaR.95){
+  # Risk contribution
+  
+  # ref: VaR.95 = sqrt(c(1.65*omega)%*%cov.mat%*%c(1.65*omega))
+  equity.cov.list = c()
+  equity.cov.list = sapply(1:length(m_equity_ticker_list), function(x) append(equity.cov.list, t(coef_df)[x,] %*% cov.mat %*% t(omega)))
+  
+  equity.risk.contribution.list = c()
+  equity.risk.contribution.list = sapply(1:length(m_equity_ticker_list), function(x) append(equity.risk.contribution.list, equity.cov.list[x]*weight[x]/c(sqrt(c(omega)%*%cov.mat%*%c(omega)))))
+  equity.risk.contribution.list            
+  
+  equity.var.risk.contribution.list = c()
+  equity.var.risk.contribution.list = 1.65*equity.risk.contribution.list
+  
+  equity.weight.list = c()
+  equity.weight.list = equity.var.risk.contribution.list/as.vector(VaR.95)
+  # sum(equity.weight.list)
+  
+  equity.weight.table = data.frame(matrix(numeric(0),ncol=m_equity_length_name, nrow = 1))
+  colnames(equity.weight.table) = m_equity_ticker_list 
+  rownames(equity.weight.table) = "Ratio"
+  equity.weight.table[1,] = equity.weight.list
+  
+  return(equity.weight.table)
+}
+```
+
