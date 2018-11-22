@@ -1,7 +1,13 @@
-td<-as.Date(w.tdays('2017-12-15','2017-12-31')$Data[[1]])
-for (ii in 1:length(td)){
-  print(ii)
-  ed<-td[ii]
+#若需要区间段重新运行，则采用如下循环
+# td<-as.Date(w.tdays('2017-12-15','2017-12-31')$Data[[1]])
+# for (ii in 1:length(td)){
+#   print(ii)
+#   ed<-td[ii]
+#   update_var(ed)
+# }
+
+#生成总的var日常更新函数
+update_var<-function(ed){
   sd<-w.tdaysoffset(-569,ed)$Data[[1]]
   lsd<-w.tdaysoffset(-284,ed)$Data[[1]]
   version_used<-1
@@ -175,13 +181,13 @@ update_factor<-function(ed){
 
 # 
 # #加载组合个券收益率数据生成的函数
-# td<-w.tdays('2018-01-01','2018-11-19')$Data[[1]]
+# td<-w.tdays('2018-08-01','2018-11-19')$Data[[1]]
 # span <- 285
 # for(ii in 1:length(td)){
 #   print(ii)
 #   ed<-td[ii]
 #   data_secr(span,ed)
-# }
+#   }
 
 data_secr<- function(span,ed)
 {
@@ -193,9 +199,9 @@ data_secr<- function(span,ed)
   library(stringr)
   
   #修改成取前两日的持仓计算收益率
-  lsd<-w.tdaysoffset(-1,ed)$Data[[1]]
+  hsd<-w.tdaysoffset(-1,ed)$Data[[1]]
   con <- dbConnect(MySQL(),host="172.16.22.186",port=3306,dbname="rm",user="guhao",password="12345678")
-  sec<-data.table(dbGetQuery(con, str_c('SELECT seccode,market FROM rm.fundhold where date between  \'', lsd, '\' and \'', ed, '\' and atype =\'SPT_S\' group by seccode,market')))
+  sec<-data.table(dbGetQuery(con, str_c('SELECT seccode,market FROM rm.fundhold where date between  \'', hsd, '\' and \'', ed, '\' and atype =\'SPT_S\' group by seccode,market')))
   num<-length(sec[market!='HK']$seccode)
   sampdate<-as.Date(w.tdaysoffset(-span+1,ed)$Data[[1]])
   #获取sec的样本并计算收益率
