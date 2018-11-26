@@ -6,17 +6,25 @@
 #   update_var(ed)
 # }
 
+
+#每日更新var基础数据前的参数设置，先设置参数
+#sd为按照570个交易日来估算lambda、cov等指标时，选取的起始交易日
+#lsd为按照285个交易日来回归因子暴露度时，选取的起始交易日
+#version_used为确认的选取因子系列的版本
+
+# sd<-w.tdaysoffset(-569,ed)$Data[[1]]
+# lsd<-w.tdaysoffset(-284,ed)$Data[[1]]
+# version_used<-1
+# process_period<-285
+# review_period<-285
+# process_start_day<-286
+# total_days<-570
+# basic.index<-'000906.SH'
+# span<-285
+
 #生成总的var日常更新函数
-update_var<-function(ed){
-  sd<-w.tdaysoffset(-569,ed)$Data[[1]]
-  lsd<-w.tdaysoffset(-284,ed)$Data[[1]]
-  version_used<-1
-  process_period<-285
-  review_period<-285
-  process_start_day<-286
-  total_days<-570
-  basic.index<-'000906.SH'
-  span<-285
+update_var<-function(sd,lsd,ed,version_used,process_period,review_period,process_start_day,total_days,basic.index,span){
+  update_sec_factor()
   update_factor(ed)
   data_secr(span,ed)
   lambda<-matrix_lambda(sd,ed,process_period)
@@ -38,6 +46,47 @@ update_var<-function(ed){
   }
   gc()
 }
+
+
+update_sec_factor<-function(){
+  #更新每日个股所属申万行业以及调入调出日期
+  library(RODBC)
+  windriskdb=odbcConnect('wind',uid='lianghua',pwd='lianghua',believeNRows=FALSE)
+  sqlstr<-paste('select s_info_windcode,sw_ind_code,entry_dt,remove_dt from newwind.AShareSWIndustriesClass')
+  stock_industry<-sqlQuery(windriskdb,sqlstr,as.is=TRUE)
+  names(stock_industry)<-c('seccode','sw_code','in_date','out_date')
+  stock_industry$sw_code<-substr(stock_industry$sw_code,1,4)
+  stock_industry$in_date<-ymd(stock_industry$in_date)
+  stock_industry$out_date<-ymd(stock_industry$out_date)
+  
+  sqlstr<-paste('select industriescode,industriesname,levelnum from newwind.AShareIndustriesCode')
+  industry_name<-sqlQuery(windriskdb,sqlstr,as.is=TRUE)
+  names(industry_name)<-c('sw_code','industry','lvl')
+  industry_name <- as.data.table(industry_name)
+  industry_name <- industry_name[str_detect(sw_code,'61') & lvl==2]
+  industry_name$sw_code<-substr(industry_name$sw_code,1,4)
+  
+  stock_industry<-merge(stock_industry,industry_name,by.x = 'sw_code',by.y = 'sw_code',all.x = TRUE)
+  stock_industry<-stock_industry[,c('seccode','sw_code','industry','in_date','out_date')]
+  stock_industry<-as.data.table(stock_industry)
+  stock_industry[is.na(out_date)]$out_date<-as.Date('2999-12-30')
+  
+  library(DBI)
+  library(RMySQL)
+  con <- dbConnect(MySQL(),host="172.16.22.186",port=3306,dbname="rm",user="guhao",password="12345678")
+  dbWriteTable(con, "stock_industry", stock_industry, overwrite=FALSE, append=TRUE,row.names=F)
+  
+  #更新每个个券对应的因子以及有效时间
+  dbSendQuery(con,'SET NAMES gbk')
+  reg_factor<-stock_industry
+  industry_list<-as.data.table(read.xlsx2('industry.xlsx',sep='',1,stringsAsFactors = FALSE))
+  reg_factor<-merge(reg_factor,industry_list,by.x = 'sw_code',by.y = 'inducode',all.x = TRUE)
+  reg_factor<-reg_factor[!is.na(code)]
+  reg_factor<-reg_factor[,c('seccode','code','in_date','out_date')]
+  names(reg_factor)<-c('seccode','f_seccode','in_date','out_date')
+  dbWriteTable(con, "reg_factor", reg_factor, overwrite=FALSE, append=TRUE,row.names=F)
+}
+
 
 #加载每日更新因子收益率的函数
 update_factor<-function(ed){
@@ -181,13 +230,13 @@ update_factor<-function(ed){
 
 # 
 # #加载组合个券收益率数据生成的函数
-# td<-w.tdays('2018-08-01','2018-11-19')$Data[[1]]
+# td<-w.tdays('2017-01-01','2017-12-31')$Data[[1]]
 # span <- 285
 # for(ii in 1:length(td)){
-#   print(ii)
-#   ed<-td[ii]
-#   data_secr(span,ed)
-#   }
+#  print(ii)
+#  ed<-td[ii]
+#  data_secr(span,ed)
+# }
 
 data_secr<- function(span,ed)
 {
